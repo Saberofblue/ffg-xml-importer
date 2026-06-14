@@ -99,12 +99,6 @@ function sumAll(node) {
   return total;
 }
 
-/** Sum of a specific set of direct child elements. */
-function sumTags(node, tags) {
-  if (!node) return 0;
-  return tags.reduce((acc, tag) => acc + int(node, tag), 0);
-}
-
 function isTrue(value) {
   return String(value).trim().toLowerCase() === "true";
 }
@@ -645,23 +639,25 @@ async function importXML(actor, xmlString) {
   descriptors.push(...childKeyDescriptors(root, "SigAbilities", "signatureability"));
 
   const items = await buildEmbeddedItems(descriptors, report);
-  const matchedType = (t) => report.matched.some((m) => m.startsWith(`${t}::`));
-  const speciesMatched = matchedType("species");
 
   /* Bake-into-base stats must not ALSO arrive as item Active Effects, or they
    * double on starwarsffg 2.x (where a stat = stored base + applied effects).
-   * Strip the characteristic change-lines from every cloned item (the species
-   * item carries +Brawn, +Agility, …). We deliberately KEEP the wounds.max /
-   * strain.max / soak / skill effect lines: the species & talent threshold
-   * bonuses are delivered as effects on top of the characteristic base we store
-   * below, and skills are reconciled separately (effectSkillRanks). */
-  const CHARACTERISTIC_EFFECT_KEY = /^system\.characteristics\..+\.value$/;
+   * Strip the characteristic AND wound/strain-threshold change-lines from every
+   * cloned item. The species item carries +Brawn/+Agility/… characteristic lines
+   * and a wounds.max/strain.max line whose value bakes in a *fixed* characteristic
+   * (e.g. Human's +12 = species 10 + an assumed Brawn/Willpower of 2 — which is
+   * wrong whenever the character's creation Brawn/WP isn't 2); each Toughened/Grit
+   * talent carries its own wounds.max/strain.max line too. We strip them all and
+   * store the authoritative OggDude threshold total in the base below, so nothing
+   * double-counts and the value can't drift on re-import. Soak and skill effect
+   * lines are deliberately KEPT (soak rises with Brawn per the system, and skills
+   * are reconciled separately via effectSkillRanks). */
+  const BAKED_EFFECT_KEY =
+    /^system\.(characteristics\..+\.value|stats\.(wounds|strain)\.max)$/;
   for (const it of items) {
     for (const eff of it.effects ?? []) {
       if (Array.isArray(eff.changes)) {
-        eff.changes = eff.changes.filter(
-          (ch) => !CHARACTERISTIC_EFFECT_KEY.test(ch.key ?? "")
-        );
+        eff.changes = eff.changes.filter((ch) => !BAKED_EFFECT_KEY.test(ch.key ?? ""));
       }
     }
   }
@@ -714,10 +710,17 @@ async function importXML(actor, xmlString) {
    * keeping characteristics out of that final update avoids re-triggering the
    * `_preUpdate` threshold recompute. */
 
-  /* --- Experience (written in the final update below) --- */
+  /* --- Experience (written in the final update below) ---
+   * OggDude's <ExperienceRanks> holds only *creation* XP (starting + species);
+   * XP a GM awarded during play is NOT exported here. A fully-built character can
+   * therefore report used > earned, which would make `available` negative. Floor
+   * the total at what's been spent (they must have earned at least that much), so
+   * a finished character imports with available = 0 instead of a negative number,
+   * while an under-spent creation-only character still shows its leftover. */
   const exp = el(root, "Experience");
-  const totalXP = sumAll(el(exp, "ExperienceRanks"));
+  const earnedXP = sumAll(el(exp, "ExperienceRanks"));
   const usedXP = int(exp, "UsedExperience");
+  const totalXP = Math.max(earnedXP, usedXP);
 
   /* --- Obligations --- */
   const oblTotal = els(el(root, "Obligations"), "CharObligation").reduce(
@@ -807,24 +810,21 @@ async function importXML(actor, xmlString) {
 
   /* --- Finalize thresholds, current damage, and XP (must run LAST) ---
    * Threshold model on starwarsffg 2.x: a stat = stored base + applied effects.
-   * The species & talent wound/strain bonuses ride along as the cloned items'
-   * effects, so the stored base holds only the characteristic contribution
-   * (Brawn for wounds, Willpower for strain) — e.g. 1 + 9 (species) + 2
-   * (Toughened) = 12, counted once. When no species item linked, nothing supplies
-   * the species portion as an effect, so fall back to the XML's char+species
-   * threshold total.
+   * We stripped the wounds.max/strain.max effect lines off every item above, so
+   * the stored base IS the whole threshold. Use OggDude's own tally — the sum of
+   * every <WoundThreshold>/<StrainThreshold> component (species base + creation
+   * characteristic + talent ranks). This matches the FFG rule the system encodes
+   * in _preUpdate (post-creation Dedication characteristic bumps do NOT raise the
+   * threshold) and can't double-count or drift, since no item effect touches it
+   * anymore. Works whether or not a species item linked.
    *
    * This update contains NO characteristics, so `_preUpdate` does not recompute
    * (and therefore cannot inflate) the thresholds. It also rewrites experience
    * and clears the xpLog flag, undoing the bogus "undid Species XP" entries and
    * negative `available` produced when the system reacted to the old species
    * item being deleted earlier in this import. */
-  const woundsMax = speciesMatched
-    ? charValues.Brawn ?? 0
-    : sumTags(el(attr, "WoundThreshold"), ["StartingRanks", "SpeciesRanks"]);
-  const strainMax = speciesMatched
-    ? charValues.Willpower ?? 0
-    : sumTags(el(attr, "StrainThreshold"), ["StartingRanks", "SpeciesRanks"]);
+  const woundsMax = sumAll(el(attr, "WoundThreshold"));
+  const strainMax = sumAll(el(attr, "StrainThreshold"));
   await actor.update({
     "system.stats.wounds.max": woundsMax,
     "system.stats.strain.max": strainMax,
