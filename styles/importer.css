@@ -1,0 +1,51 @@
+/* FFG XML Character Importer */
+
+/* Header button on the actor sheet */
+.ffg-xml-import {
+  flex: 0 0 auto;
+  margin: 0 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ffg-xml-import i {
+  margin-right: 3px;
+}
+
+/* Import dialog */
+.ffg-xml-import-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.ffg-xml-import-form .ffg-xml-intro {
+  margin: 0;
+  font-size: 13px;
+}
+
+.ffg-xml-import-form .form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ffg-xml-import-form label {
+  font-weight: bold;
+}
+
+.ffg-xml-import-form input[type="file"] {
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--color-border-light-tertiary, #999);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.ffg-xml-import-form .ffg-xml-warning {
+  margin: 0;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--color-text-dark-secondary, #7a4a4a);
+}

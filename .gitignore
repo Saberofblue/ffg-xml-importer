@@ -1,0 +1,10 @@
+# Claude Code local settings
+.claude/
+
+# Build artifacts (the release zip is attached to GitHub Releases, not committed)
+module.zip
+*.zip
+
+# OS cruft
+Thumbs.db
+.DS_Store

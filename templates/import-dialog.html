@@ -1,0 +1,21 @@
+<form class="ffg-xml-import-form">
+  <p class="ffg-xml-intro">
+    Select an OggDude Character Generator XML export to import into this actor.
+  </p>
+
+  <div class="form-group">
+    <label for="ffg-xml-file">XML File</label>
+    <input
+      type="file"
+      id="ffg-xml-file"
+      name="ffg-xml-file"
+      accept=".xml,application/xml,text/xml"
+    />
+  </div>
+
+  <p class="notes ffg-xml-warning">
+    <strong>This replaces the character.</strong> All existing items and effects
+    on this actor are removed first, then the imported character (name, stats,
+    items, and effects) is written in fresh.
+  </p>
+</form>
