@@ -402,60 +402,6 @@ function prepareLinkedSpec(obj, specNode) {
   }
 }
 
-/**
- * Build the ActiveEffect changes for wounds/strain/soak.
- *
- * starwarsffg derives these from a characteristic (Brawn/Willpower/Brawn) at
- * prepareData time, so a direct actor.update() of the totals is overwritten.
- * We instead add the *remainder* (XML total minus the characteristic the
- * system already supplies) the same way the system's own species/talent items
- * do: an ADD-mode change on the derived key.
- */
-function buildDerivedStatChanges(attr, charValues) {
-  const ADD = CONST.ACTIVE_EFFECT_MODES.ADD; // 2
-  const brawn = charValues.Brawn ?? 0;
-  const willpower = charValues.Willpower ?? 0;
-
-  // TalentRanks are intentionally omitted: the linked specialization items now
-  // carry enabled per-talent stat effects (Toughened, …) that supply the talent
-  // wound/strain bonus, so adding it here too would double-count.
-  const woundsTotal = sumTags(el(attr, "WoundThreshold"), [
-    "StartingRanks",
-    "SpeciesRanks",
-  ]);
-  const strainTotal = sumTags(el(attr, "StrainThreshold"), [
-    "StartingRanks",
-    "SpeciesRanks",
-  ]);
-  const soakTotal = sumTags(el(attr, "SoakValue"), [
-    "StartingRanks",
-    "PurchasedRanks",
-  ]);
-
-  const deltas = [
-    ["system.stats.wounds.max", woundsTotal - brawn],
-    ["system.stats.strain.max", strainTotal - willpower],
-    ["system.stats.soak.value", soakTotal - brawn],
-  ];
-
-  const changes = deltas
-    .filter(([, delta]) => delta !== 0)
-    .map(([key, delta]) => ({ key, mode: ADD, value: String(delta), priority: 20 }));
-
-  // Encumbrance threshold is 5 + Brawn. The system supplies Brawn as the base
-  // when no species item is present, so add the flat +5 the rules grant.
-  // (Skipped at the call site when a species item links, since the species
-  // item carries its own encumbrance-threshold effect.)
-  changes.push({
-    key: "system.stats.encumbrance.max",
-    mode: ADD,
-    value: "5",
-    priority: 20,
-  });
-
-  return changes;
-}
-
 /* -------------------------------------------- */
 /*  Source resolver (world items + compendia)   */
 /* -------------------------------------------- */
@@ -702,24 +648,40 @@ async function importXML(actor, xmlString) {
   const matchedType = (t) => report.matched.some((m) => m.startsWith(`${t}::`));
   const speciesMatched = matchedType("species");
 
+  /* Bake-into-base stats must not ALSO arrive as item Active Effects, or they
+   * double on starwarsffg 2.x (where a stat = stored base + applied effects).
+   * Strip the characteristic change-lines from every cloned item (the species
+   * item carries +Brawn, +Agility, …). We deliberately KEEP the wounds.max /
+   * strain.max / soak / skill effect lines: the species & talent threshold
+   * bonuses are delivered as effects on top of the characteristic base we store
+   * below, and skills are reconciled separately (effectSkillRanks). */
+  const CHARACTERISTIC_EFFECT_KEY = /^system\.characteristics\..+\.value$/;
+  for (const it of items) {
+    for (const eff of it.effects ?? []) {
+      if (Array.isArray(eff.changes)) {
+        eff.changes = eff.changes.filter(
+          (ch) => !CHARACTERISTIC_EFFECT_KEY.test(ch.key ?? "")
+        );
+      }
+    }
+  }
+
   /* --- Characteristics ---
-   * A linked species item re-adds SpeciesRanks through its own Active Effect
-   * (e.g. Human +2 to every characteristic), so we drop SpeciesRanks from the
-   * written base when the species is matched. TalentRanks (a Dedication's
-   * chosen +1) is NOT re-added by any effect — the system stores Dedication
-   * with empty `attributes`, so the characteristic choice carries no effect —
-   * therefore it is always baked into the base. charValues keeps the full
-   * total for the synthetic-effect math below. */
+   * Bake the FULL characteristic (purchased + species + talent) straight into the
+   * actor base, now that the species item no longer contributes its own
+   * characteristic effect (stripped just above). Storing the full value also
+   * keeps starwarsffg 2.x's `_preUpdate` quiet on re-import: that handler only
+   * recomputes the wounds/strain threshold when an update's Brawn/Willpower
+   * differs from the actor's current (effect-derived) value. Because the written
+   * base now equals the derived value, a re-import is a no-op for it — which is
+   * what stops the threshold from growing a little every time. */
   const charValues = {};
   for (const node of els(el(root, "Characteristics"), "CharCharacteristic")) {
     const key = txt(node, "Key");
     const jsonName = CHARACTERISTIC_MAP[key];
     if (!jsonName) continue;
-    const rank = el(node, "Rank");
-    charValues[jsonName] = sumAll(rank);
-    let value = int(rank, "PurchasedRanks") + int(rank, "TalentRanks");
-    if (!speciesMatched) value += int(rank, "SpeciesRanks");
-    updateData[`system.characteristics.${jsonName}.value`] = value;
+    charValues[jsonName] = sumAll(el(node, "Rank"));
+    updateData[`system.characteristics.${jsonName}.value`] = charValues[jsonName];
   }
 
   /* --- Derived stats: defence has no characteristic base, so we write it to the
@@ -745,31 +707,17 @@ async function importXML(actor, xmlString) {
     int(el(attr, "DefenseMelee"), "PurchasedRanks") - armourDefence
   );
 
-  /* --- Wounds/Strain threshold base: always reset to 0. ---
-   * We never write the threshold totals; they come entirely from the linked
-   * species/talent items' effects (or the synthetic effect when no species
-   * links). The system only recomputes the threshold from
-   * characteristics + item modifiers when the stored base is 0 — its
-   * `_applyModifiers` guard is `if (data.attributes.Wounds.value === 0)`, and
-   * that attribute is seeded from `system.stats.wounds.max`. When the base is
-   * non-zero it is ADDED ON TOP of the item-derived total instead, doubling the
-   * threshold. A fresh actor starts at 0, but a re-import target (or an actor
-   * touched by an older importer) can carry a stale non-zero base, so we must
-   * clear it here to keep re-imports a true replacement rather than a stack. */
-  updateData["system.stats.wounds.max"] = 0;
-  updateData["system.stats.strain.max"] = 0;
+  /* Wounds/strain thresholds, current damage, and experience are written in a
+   * single dedicated update AFTER the items are (re)created — see the end of this
+   * function. Doing it last lets our values win over whatever the system's item
+   * create/delete lifecycle writes (notably the species-removal XP "undo"), and
+   * keeping characteristics out of that final update avoids re-triggering the
+   * `_preUpdate` threshold recompute. */
 
-  /* Current wounds/strain damage is also reset, so a re-imported sheet starts
-   * undamaged rather than inheriting stale damage from the previous occupant of
-   * the actor (e.g. a value left above the freshly recomputed threshold, which
-   * would read as incapacitated). */
-  updateData["system.stats.wounds.value"] = 0;
-  updateData["system.stats.strain.value"] = 0;
-
-  /* --- Experience: set total only; the system derives `available` from total
-   * minus the cost of owned talents/items. */
+  /* --- Experience (written in the final update below) --- */
   const exp = el(root, "Experience");
-  updateData["system.experience.total"] = sumAll(el(exp, "ExperienceRanks"));
+  const totalXP = sumAll(el(exp, "ExperienceRanks"));
+  const usedXP = int(exp, "UsedExperience");
 
   /* --- Obligations --- */
   const oblTotal = els(el(root, "Obligations"), "CharObligation").reduce(
@@ -857,23 +805,35 @@ async function importXML(actor, xmlString) {
 
   if (items.length) await actor.createEmbeddedDocuments("Item", items);
 
-  // Only fall back to the synthetic Wounds/Strain/Soak effect when no real
-  // species item linked; a matched species carries its own Active Effects.
-  if (!speciesMatched) {
-    const statChanges = buildDerivedStatChanges(attr, charValues);
-    if (statChanges.length) {
-      await actor.createEmbeddedDocuments("ActiveEffect", [
-        {
-          name: "OggDude Import (derived stats)",
-          img: "icons/svg/upgrade.svg",
-          changes: statChanges,
-          disabled: false,
-          transfer: false,
-          flags: { [MODULE_ID]: { generated: true } },
-        },
-      ]);
-    }
-  }
+  /* --- Finalize thresholds, current damage, and XP (must run LAST) ---
+   * Threshold model on starwarsffg 2.x: a stat = stored base + applied effects.
+   * The species & talent wound/strain bonuses ride along as the cloned items'
+   * effects, so the stored base holds only the characteristic contribution
+   * (Brawn for wounds, Willpower for strain) — e.g. 1 + 9 (species) + 2
+   * (Toughened) = 12, counted once. When no species item linked, nothing supplies
+   * the species portion as an effect, so fall back to the XML's char+species
+   * threshold total.
+   *
+   * This update contains NO characteristics, so `_preUpdate` does not recompute
+   * (and therefore cannot inflate) the thresholds. It also rewrites experience
+   * and clears the xpLog flag, undoing the bogus "undid Species XP" entries and
+   * negative `available` produced when the system reacted to the old species
+   * item being deleted earlier in this import. */
+  const woundsMax = speciesMatched
+    ? charValues.Brawn ?? 0
+    : sumTags(el(attr, "WoundThreshold"), ["StartingRanks", "SpeciesRanks"]);
+  const strainMax = speciesMatched
+    ? charValues.Willpower ?? 0
+    : sumTags(el(attr, "StrainThreshold"), ["StartingRanks", "SpeciesRanks"]);
+  await actor.update({
+    "system.stats.wounds.max": woundsMax,
+    "system.stats.strain.max": strainMax,
+    "system.stats.wounds.value": 0,
+    "system.stats.strain.value": 0,
+    "system.experience.total": totalXP,
+    "system.experience.available": totalXP - usedXP,
+    "flags.starwarsffg.xpLog": [],
+  });
 
   // Equipped armour/weapon items ship a frozen `(inherent)` soak/defence effect
   // captured while the catalog item was unequipped (so it resolves to 0). The
