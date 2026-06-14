@@ -18,7 +18,7 @@ stats are rebuilt from the XML (linking to your world's compendia where possible
 In Foundry: **Add-on Modules → Install Module**, then paste the manifest URL:
 
 ```
-https://github.com/OWNER/REPO/releases/latest/download/module.json
+https://github.com/Saberofblue/ffg-xml-importer/releases/latest/download/module.json
 ```
 
 Updates are picked up via the same URL — Foundry's **Update** button will fetch the
