@@ -53,6 +53,26 @@ const SKILL_MAP = {
   WARF: "Knowledge: Warfare",
 };
 
+/* Standard FFG skills in the system's list order, each [name, type,
+ * characteristic]. Used to undo the system OggDude importer's group-skill
+ * die-modifier collapse (see expandCollapsedSkillEffects). The live skill theme
+ * is preferred when available so custom themes still work; this is the fallback. */
+const STD_SKILLS = [
+  ["Brawl", "Combat", "Brawn"], ["Gunnery", "Combat", "Agility"], ["Lightsaber", "Combat", "Brawn"],
+  ["Melee", "Combat", "Brawn"], ["Ranged: Light", "Combat", "Agility"], ["Ranged: Heavy", "Combat", "Agility"],
+  ["Astrogation", "General", "Intellect"], ["Athletics", "General", "Brawn"], ["Charm", "Social", "Presence"],
+  ["Coercion", "Social", "Willpower"], ["Computers", "General", "Intellect"], ["Cool", "General", "Presence"],
+  ["Coordination", "General", "Agility"], ["Deception", "Social", "Cunning"], ["Discipline", "General", "Willpower"],
+  ["Leadership", "Social", "Presence"], ["Mechanics", "General", "Intellect"], ["Medicine", "General", "Intellect"],
+  ["Negotiation", "Social", "Presence"], ["Perception", "General", "Cunning"], ["Piloting: Planetary", "General", "Agility"],
+  ["Piloting: Space", "General", "Agility"], ["Resilience", "General", "Brawn"], ["Skulduggery", "General", "Cunning"],
+  ["Stealth", "General", "Agility"], ["Streetwise", "General", "Cunning"], ["Survival", "General", "Cunning"],
+  ["Vigilance", "General", "Willpower"], ["Knowledge: Core Worlds", "Knowledge", "Intellect"],
+  ["Knowledge: Education", "Knowledge", "Intellect"], ["Knowledge: Lore", "Knowledge", "Intellect"],
+  ["Knowledge: Outer Rim", "Knowledge", "Intellect"], ["Knowledge: Underworld", "Knowledge", "Intellect"],
+  ["Knowledge: Warfare", "Knowledge", "Intellect"], ["Knowledge: Xenology", "Knowledge", "Intellect"],
+];
+
 /* -------------------------------------------- */
 /*  XML helpers                                 */
 /* -------------------------------------------- */
@@ -154,6 +174,10 @@ function gearDescriptors(root, containerTag, itemTag, type) {
       // (an unequipped item's inherent soak/defence effect resolves to 0).
       equipped: isTrue(txt(node, "Equipped")),
       addlHP: int(node, "AddlHP"),
+      // Innate weapons (<Innate>true</Innate> with an empty <ItemKey>) are
+      // synthetic attacks OggDude grants from gear/cybernetics — UNARMED, plus
+      // INNATE_* like a Repulsor Fist or garrote — never catalog items.
+      innate: isTrue(txt(node, "Innate")),
       // Installed attachments (<PurchasedAttachments>) are linked from the
       // world's attachment compendia and merged into system.itemattachment.
       attachNode: el(node, "PurchasedAttachments"),
@@ -166,32 +190,72 @@ function gearDescriptors(root, containerTag, itemTag, type) {
 /* -------------------------------------------- */
 
 /**
+ * Structured skill die-modifier modtypes → the numeric `system.skills.<Skill>.<field>`
+ * the system raises for each. Mirrors the system's own mapping (dice/pool.js
+ * modtype checks and swffg-main allSkillChanges), so a hoisted ADD effect lands
+ * on exactly the field a native sheet edit would. These come from a weapon/armor
+ * mod's <DieModifier> (e.g. Reflec Shadowskin's "+1 Advantage to Stealth"); the
+ * "to spot/notice the wearer" entries are keyless MiscDesc text, carry no
+ * structured modtype, and so are intentionally never matched here.
+ */
+const SKILL_DIE_FIELDS = {
+  "Skill Boost": "boost",
+  "Skill Setback": "setback",
+  "Skill Remove Setback": "remsetback",
+  "Skill Add Upgrade": "upgrades",
+  "Skill Add Success": "success",
+  "Skill Add Advantage": "advantage",
+  "Skill Add Light": "light",
+  "Skill Add Failure": "failure",
+  "Skill Add Threat": "threat",
+  "Skill Add Dark": "dark",
+  "Skill Add Despair": "despair",
+  "Skill Add Triumph": "triumph",
+};
+
+/**
  * Map an attachment/talent `attributes` entry to the actor-stat Active Effect
  * change(s) it should contribute. Only attributes that target a derived actor
- * stat produce a change; "Weapon Stat" (damage/crit) adjusts the item's own
- * display value and "Roll Modifiers" (Add Boost/Setback) are handled by the
+ * stat (Armor Stat / Stat) or a numeric skill die-pool field (Skill Add
+ * Advantage, …) produce a change; "Weapon Stat" (damage/crit) adjusts the item's
+ * own display value and "Roll Modifiers" (Add Boost/Setback) are handled by the
  * system's dice logic, so both yield nothing here. The "Stat" mappings are
  * confirmed against the linked talent effects (Toughened→wounds, Enduring→soak,
  * Sixth Sense→defence.ranged, …); "Armor Stat"/soak is confirmed against the
- * Superior Armor Customization (SACUST) attachment reference.
+ * Superior Armor Customization (SACUST) attachment reference; the skill-die
+ * mappings against the system's own dice/pool modtypes (Reflec Shadowskin).
  */
 function attachmentStatChanges(a) {
   const modtype = String(a?.modtype ?? "");
-  if (modtype !== "Armor Stat" && modtype !== "Stat") return [];
-  const keys = {
-    soak: ["system.stats.soak.value"],
-    wounds: ["system.stats.wounds.max"],
-    strain: ["system.stats.strain.max"],
-    "defence-ranged": ["system.stats.defence.ranged"],
-    "defense-ranged": ["system.stats.defence.ranged"],
-    "defence-melee": ["system.stats.defence.melee"],
-    "defense-melee": ["system.stats.defence.melee"],
-    // Armor "Defence" applies to both tracks, mirroring an armor's inherent effect.
-    defence: ["system.stats.defence.ranged", "system.stats.defence.melee"],
-    defense: ["system.stats.defence.ranged", "system.stats.defence.melee"],
-  }[String(a?.mod ?? "").toLowerCase()] ?? [];
   const value = String(a?.value ?? "");
-  return keys.map((key) => ({ key, mode: CONST.ACTIVE_EFFECT_MODES.ADD, value }));
+  if (modtype === "Armor Stat" || modtype === "Stat") {
+    const keys = {
+      soak: ["system.stats.soak.value"],
+      wounds: ["system.stats.wounds.max"],
+      strain: ["system.stats.strain.max"],
+      "defence-ranged": ["system.stats.defence.ranged"],
+      "defense-ranged": ["system.stats.defence.ranged"],
+      "defence-melee": ["system.stats.defence.melee"],
+      "defense-melee": ["system.stats.defence.melee"],
+      // Armor "Defence" applies to both tracks, mirroring an armor's inherent effect.
+      defence: ["system.stats.defence.ranged", "system.stats.defence.melee"],
+      defense: ["system.stats.defence.ranged", "system.stats.defence.melee"],
+    }[String(a?.mod ?? "").toLowerCase()] ?? [];
+    return keys.map((key) => ({ key, mode: CONST.ACTIVE_EFFECT_MODES.ADD, value }));
+  }
+  // A mod that grants the wearer extra symbols on a specific skill (e.g. Reflec
+  // Shadowskin's automatic Advantage to Stealth). The system stores these as a
+  // numeric system.skills.<Skill>.<field> raised by an ADD effect on the HOST
+  // item; the nested attachment effect Foundry never applies, so hoist it here.
+  const skillField = SKILL_DIE_FIELDS[modtype];
+  if (skillField) {
+    const skill = String(a?.mod ?? "");
+    if (!skill || !value) return [];
+    return [
+      { key: `system.skills.${skill}.${skillField}`, mode: CONST.ACTIVE_EFFECT_MODES.ADD, value },
+    ];
+  }
+  return [];
 }
 
 /** Minimal transfer Active Effect, shaped like the ones the system persists. */
@@ -234,7 +298,9 @@ function applyCraftedMods(att, ci) {
   const ranks = new Map();
   for (const m of els(el(ci, "AllMods"), "Mod")) {
     const modKey = txt(m, "Key");
-    if (!modKey) continue;
+    // HPADD is applied to the host's hard-point capacity (see buildAttachments),
+    // not as an itemmodifier, so don't try to match it to a catalog mod here.
+    if (!modKey || modKey === "HPADD") continue;
     ranks.set(modKey, (ranks.get(modKey) ?? 0) + (int(m, "Count") || 1));
   }
   for (const [modKey, rank] of ranks) {
@@ -264,9 +330,22 @@ function applyCraftedMods(att, ci) {
 async function buildAttachments(attachNode, report) {
   const attachments = [];
   const parentEffects = [];
+  let addedHardpoints = 0;
   for (const ci of els(attachNode, "CharItemAttachment")) {
     const key = txt(ci, "AttachKey");
     if (!key) continue;
+    // An attachment's HPADD base mod (e.g. Reverse Engineering, "Add One Hard
+    // Point") raises the HOST item's hard-point capacity by its Count. OggDude
+    // lists it per attachment under <AllMods>; the system drops it on import, so
+    // the host ends up over-attached (e.g. 5 HP showing "-1"). Apply it here.
+    // (HPADD2 is a vehicle-only mod and is intentionally not counted.)
+    let isSuperior = false;
+    for (const m of els(el(ci, "AllMods"), "Mod")) {
+      const modKey = txt(m, "Key");
+      if (modKey === "HPADD") addedHardpoints += int(m, "Count") || 1;
+      // Superior quality — noted here, applied to the host below (armour only).
+      if (modKey === "SUPERIOR") isSuperior = true;
+    }
     const source = await resolveSource("itemattachment", key);
     if (!source) {
       report.stubbed.push(`itemattachment::${key}`);
@@ -284,11 +363,25 @@ async function buildAttachments(attachNode, report) {
       const changes = attachmentStatChanges(a);
       if (changes.length) parentEffects.push(makeAttachmentEffect(attrKey, changes));
     }
+    // OggDude grants the Superior quality on ARMOUR +1 soak. The system models
+    // Superior as a bare descriptor with no mechanical effect (Superior Armor
+    // Customization / SACUST carries no soak attribute), so the bonus is otherwise
+    // lost — synthesise it here to match the builder. Superior on a WEAPON instead
+    // grants +1 Advantage (a dice-pool effect handled elsewhere), so this is gated
+    // to armour attachments. Superior's -1 encumbrance is a no-op for worn armour
+    // (the system already floors the worn contribution at 0) and is omitted.
+    if (isSuperior && att.system?.type === "armour") {
+      parentEffects.push(
+        makeAttachmentEffect("Superior", [
+          { key: "system.stats.soak.value", mode: CONST.ACTIVE_EFFECT_MODES.ADD, value: "1" },
+        ])
+      );
+    }
     applyCraftedMods(att, ci);
     report.matched.push(`itemattachment::${key}`);
     attachments.push(att);
   }
-  return { attachments, parentEffects };
+  return { attachments, parentEffects, addedHardpoints };
 }
 
 /** Descriptors for simple <Key>-only containers (sig abilities). */
@@ -361,6 +454,88 @@ function markLearnedForcePowerUpgrades(obj, powerNode) {
       const path = `system.${bag}.upgrade${idx}`;
       if (foundry.utils.hasProperty(obj, path)) {
         foundry.utils.setProperty(obj, `${path}.islearned`, true);
+      }
+    }
+  }
+}
+
+let _skillListCache = null;
+/**
+ * Ordered [name, type, characteristic] skill list. Uses the world's active skill
+ * theme when readable (so custom themes work), else the standard FFG list. The
+ * order matters: it must match the order the system iterates when it collapses
+ * group die-modifiers, so we target the same "first" skill it did.
+ */
+function skillList() {
+  if (_skillListCache) return _skillListCache;
+  try {
+    const theme = game.settings.get("starwarsffg", "skilltheme");
+    const lists = game.settings.get("starwarsffg", "arraySkillList");
+    const skills = (lists.find((i) => i.id === theme) ?? lists[0])?.skills;
+    if (skills && Object.keys(skills).length) {
+      _skillListCache = Object.keys(skills).map((n) => [n, skills[n].type, skills[n].characteristic]);
+      return _skillListCache;
+    }
+  } catch (e) {
+    /* settings unavailable — fall back to the standard list */
+  }
+  _skillListCache = STD_SKILLS;
+  return _skillListCache;
+}
+
+/**
+ * Undo the system OggDude importer's group-skill die-modifier collapse.
+ *
+ * `import-helpers.js#processDieMod` mishandles a talent die-modifier that targets
+ * a whole skill group — `<SkillType>` ("all Knowledge skills") or `<SkillChar>`
+ * ("all Brawn skills"): it loops the group but reuses one attribute key, summing
+ * the per-skill value onto the FIRST skill. So Researcher ("remove 1 setback from
+ * all 7 Knowledge skills") becomes a single `Knowledge: Core Worlds remsetback 7`
+ * instead of remsetback 1 on each of the 7. We reverse it on the cloned item: a
+ * numeric skill change whose target is the first member of a group and whose
+ * value divides evenly by the group size is fanned back out to one change per
+ * skill at the per-skill value. (A group is a `type` set or a `characteristic`
+ * set; the first-of-group + divisibility test makes false positives effectively
+ * impossible — real single-skill talents grant value 1.)
+ */
+function expandCollapsedSkillEffects(obj) {
+  const list = skillList();
+  const groupFor = (skill, dim) => {
+    const i = dim === "type" ? 1 : 2;
+    const row = list.find((r) => r[0] === skill);
+    if (!row) return null;
+    const members = list.filter((r) => r[i] === row[i]).map((r) => r[0]);
+    return members.length > 1 && members[0] === skill ? members : null;
+  };
+  const groupOf = (skill) => groupFor(skill, "type") ?? groupFor(skill, "char");
+
+  for (const eff of obj.effects ?? []) {
+    if (!Array.isArray(eff.changes)) continue;
+    const out = [];
+    for (const ch of eff.changes) {
+      const m = /^system\.skills\.(.+)\.([A-Za-z]+)$/.exec(ch.key ?? "");
+      const v = m ? parseInt(ch.value, 10) : NaN;
+      const group = m && Number.isFinite(v) && v > 1 ? groupOf(m[1]) : null;
+      if (group && v % group.length === 0) {
+        const per = String(v / group.length);
+        for (const g of group) out.push({ ...ch, key: `system.skills.${g}.${m[2]}`, value: per });
+      } else {
+        out.push(ch);
+      }
+    }
+    eff.changes = out;
+  }
+
+  // Keep the talent-tree tooltip honest (cosmetic): correct the per-talent value.
+  for (const bag of ["talents", "collection"]) {
+    const node = foundry.utils.getProperty(obj, `system.${bag}`);
+    if (!node) continue;
+    for (const t of Object.values(node)) {
+      for (const a of Object.values(t?.attributes ?? {})) {
+        const v = parseInt(a?.value, 10);
+        if (!a?.mod || !Number.isFinite(v) || v <= 1) continue;
+        const group = groupOf(a.mod);
+        if (group && v % group.length === 0) a.value = v / group.length;
       }
     }
   }
@@ -474,6 +649,57 @@ function stubItem(d) {
   };
 }
 
+/**
+ * The innate "Unarmed" attack. OggDude writes a <CharWeapon> with key UNARMED
+ * into every character export, but it is never a catalog weapon (no data set
+ * defines it), so it can't resolve from any compendium. Synthesize a correct
+ * Brawl/Brawn attack (Damage +0 = Brawn, Crit 5, Engaged) instead of letting it
+ * fall through to a junk stub (which imported as Ranged: Light, damage 0).
+ */
+function innateUnarmed(d) {
+  return {
+    name: "Unarmed",
+    type: "weapon",
+    flags: {
+      starwarsffg: { ffgimportid: "UNARMED" },
+      [MODULE_ID]: { generated: true },
+    },
+    system: {
+      skill: { value: "Brawl", useBrawn: true },
+      damage: { value: 0 },
+      crit: { value: 5 },
+      range: { value: "Engaged" },
+      characteristic: { value: "Brawn" },
+      quantity: { value: 1 },
+      equippable: { value: true, equipped: true },
+    },
+  };
+}
+
+/**
+ * Total Defensive rating a weapon confers, summed across its own qualities and
+ * any installed attachments' qualities (e.g. Solari Crystal Defensive 2 + Curved
+ * Hilt Defensive 1 = 3). Used to undo OggDude's habit of SUMMING the Defensive
+ * of every equipped weapon into melee defence — the rules only grant the single
+ * highest, so dual-wielding two Defensive 3 sabers is melee defence 3, not 6.
+ */
+function weaponDefensiveRating(item) {
+  let total = 0;
+  const addFrom = (mods) => {
+    for (const m of mods ?? []) {
+      const isDef =
+        m?.flags?.starwarsffg?.ffgimportid === "DEFENSIVE" ||
+        /^Defensive\b/i.test(m?.name ?? "");
+      if (isDef) total += parseInt(m?.system?.rank, 10) || 0;
+    }
+  };
+  addFrom(foundry.utils.getProperty(item, "system.itemmodifier"));
+  for (const att of foundry.utils.getProperty(item, "system.itemattachment") ?? []) {
+    addFrom(foundry.utils.getProperty(att, "system.itemmodifier"));
+  }
+  return total;
+}
+
 /** A full copy of a matched source document, retagged for this import. */
 async function cloneItem(source, d, report) {
   const obj = source.obj;
@@ -514,21 +740,51 @@ async function cloneItem(source, d, report) {
   // Installed attachments: clone the linked attachment docs into the host
   // item and add the parent effects their stat attributes require.
   if (d.attachNode && foundry.utils.hasProperty(obj, "system.itemattachment")) {
-    const { attachments, parentEffects } = await buildAttachments(d.attachNode, report);
+    const { attachments, parentEffects, addedHardpoints } = await buildAttachments(d.attachNode, report);
     if (attachments.length) {
       const existing = foundry.utils.getProperty(obj, "system.itemattachment") ?? [];
       foundry.utils.setProperty(obj, "system.itemattachment", existing.concat(attachments));
     }
     if (parentEffects.length) obj.effects = (obj.effects ?? []).concat(parentEffects);
+    // HPADD attachments (e.g. Reverse Engineering) raise the host's hard-point
+    // capacity — add on top of the catalog base + any <AddlHP> already applied.
+    if (addedHardpoints && foundry.utils.hasProperty(obj, "system.hardpoints.value")) {
+      foundry.utils.setProperty(
+        obj,
+        "system.hardpoints.value",
+        (foundry.utils.getProperty(obj, "system.hardpoints.value") || 0) + addedHardpoints
+      );
+    }
   }
   if (d.type === "specialization" && d.node) prepareLinkedSpec(obj, d.node);
   if (d.type === "forcepower" && d.node) markLearnedForcePowerUpgrades(obj, d.node);
+  // Repair the system importer's group-skill die-modifier collapse (e.g.
+  // Researcher's "remove 7 setback from Core Worlds" -> 1 from each Knowledge).
+  expandCollapsedSkillEffects(obj);
   return obj;
 }
 
 async function buildEmbeddedItems(descriptors, report) {
   const out = [];
   for (const d of descriptors) {
+    // Innate weapons carry no <ItemKey> and no stats, so none resolve to a
+    // catalog item. UNARMED is the one we can faithfully synthesize (its profile
+    // is fixed: Brawl/Brawn, Dam +0, Crit 5, Engaged — see innateUnarmed). The
+    // rest (INNATE_GARROTE, INNATE_REPULSOR_FIST, …) are granted by cybernetics/
+    // attachments whose damage, crit, and qualities live only in the granting
+    // item — which imports separately with full rules text. With no stats in the
+    // XML there is nothing to synthesize faithfully, so skip them rather than
+    // fabricate a junk weapon (previously a Ranged: Light, damage-0 stub). They
+    // are surfaced in the report so the user can add them by hand if wanted.
+    if (d.type === "weapon" && (d.innate || d.key === "UNARMED")) {
+      if (d.key === "UNARMED") {
+        out.push(innateUnarmed(d));
+        report.matched.push("weapon::UNARMED");
+      } else {
+        report.skipped.push(`${d.type}::${d.key}`);
+      }
+      continue;
+    }
     const source = await resolveSource(d.type, d.key);
     if (source) {
       out.push(await cloneItem(source, d, report));
@@ -600,7 +856,7 @@ async function importXML(actor, xmlString) {
    * Stat writes below depend on what linked, so granted ranks/effects from
    * matched species/career/specialization items aren't double-counted. */
   await buildSourceIndex();
-  const report = { matched: [], stubbed: [] };
+  const report = { matched: [], stubbed: [], skipped: [] };
 
   const descriptors = [
     ...gearDescriptors(root, "Weapons", "CharWeapon", "weapon"),
@@ -649,15 +905,34 @@ async function importXML(actor, xmlString) {
    * wrong whenever the character's creation Brawn/WP isn't 2); each Toughened/Grit
    * talent carries its own wounds.max/strain.max line too. We strip them all and
    * store the authoritative OggDude threshold total in the base below, so nothing
-   * double-counts and the value can't drift on re-import. Soak and skill effect
-   * lines are deliberately KEPT (soak rises with Brawn per the system, and skills
-   * are reconciled separately via effectSkillRanks). */
+   * double-counts and the value can't drift on re-import. Armour soak/defence and
+   * skill effect lines are deliberately KEPT (so equip/unequip still works, and
+   * skills are reconciled separately via effectSkillRanks). */
   const BAKED_EFFECT_KEY =
     /^system\.(characteristics\..+\.value|stats\.(wounds|strain)\.max)$/;
   for (const it of items) {
+    // A species' (inherent) soak line re-seeds the creation Brawn that the actor's
+    // base soak ALREADY counts (the system stores base soak = Brawn and keeps it
+    // synced in _preUpdate), so keeping it double-counts Brawn. Strip it; armour
+    // and talent soak stay as effects. Base soak is rebaked to Brawn below.
+    const stripSoak = it.type === "species";
+    // Unequipped armour/weapon must not contribute soak/defence. The system only
+    // disables an item's (inherent) effect when its equip state CHANGES via the
+    // sheet (item-ffg.js _onUpdate); a freshly-created-unequipped item keeps it
+    // enabled, so an unworn jacket would still add its soak. Disable it here.
+    const unequipped =
+      ["armour", "weapon"].includes(it.type) &&
+      foundry.utils.hasProperty(it, "system.equippable.equipped") &&
+      !foundry.utils.getProperty(it, "system.equippable.equipped");
     for (const eff of it.effects ?? []) {
+      if (unequipped && eff.name === "(inherent)") eff.disabled = true;
       if (Array.isArray(eff.changes)) {
-        eff.changes = eff.changes.filter((ch) => !BAKED_EFFECT_KEY.test(ch.key ?? ""));
+        eff.changes = eff.changes.filter((ch) => {
+          const key = ch.key ?? "";
+          if (BAKED_EFFECT_KEY.test(key)) return false;
+          if (stripSoak && key === "system.stats.soak.value") return false;
+          return true;
+        });
       }
     }
   }
@@ -694,13 +969,28 @@ async function importXML(actor, xmlString) {
     if (!foundry.utils.getProperty(it, "system.equippable.equipped")) return sum;
     return sum + (Number(foundry.utils.getProperty(it, "system.defence.value")) || 0);
   }, 0);
+  // OggDude sums the Defensive quality of EVERY equipped weapon into melee
+  // defence; the rules grant only the highest. Subtract the surplus (sum − max)
+  // so a set of equal Defensive sabers counts once. (No Defensive weapons, or a
+  // single one, leaves this 0 — backward compatible.)
+  const equippedWeaponDef = items
+    .filter(
+      (it) =>
+        it.type === "weapon" &&
+        foundry.utils.getProperty(it, "system.equippable.equipped")
+    )
+    .map(weaponDefensiveRating)
+    .filter((v) => v > 0);
+  const weaponDefSurplus = equippedWeaponDef.length
+    ? equippedWeaponDef.reduce((a, b) => a + b, 0) - Math.max(...equippedWeaponDef)
+    : 0;
   updateData["system.stats.defence.ranged"] = Math.max(
     0,
     int(el(attr, "DefenseRanged"), "PurchasedRanks") - armourDefence
   );
   updateData["system.stats.defence.melee"] = Math.max(
     0,
-    int(el(attr, "DefenseMelee"), "PurchasedRanks") - armourDefence
+    int(el(attr, "DefenseMelee"), "PurchasedRanks") - armourDefence - weaponDefSurplus
   );
 
   /* Wounds/strain thresholds, current damage, and experience are written in a
@@ -825,11 +1115,17 @@ async function importXML(actor, xmlString) {
    * item being deleted earlier in this import. */
   const woundsMax = sumAll(el(attr, "WoundThreshold"));
   const strainMax = sumAll(el(attr, "StrainThreshold"));
+  // Base soak = Brawn. Armour soak and talent soak (Enduring, …) are applied as
+  // their own kept Active Effects on top; the species' redundant Brawn-seed soak
+  // line was stripped above. Writing it here (in this characteristic-free update,
+  // so _preUpdate stays quiet) makes soak deterministic and drift-proof on
+  // re-import instead of relying on _preUpdate's running Brawn adjustment.
   await actor.update({
     "system.stats.wounds.max": woundsMax,
     "system.stats.strain.max": strainMax,
     "system.stats.wounds.value": 0,
     "system.stats.strain.value": 0,
+    "system.stats.soak.value": charValues.Brawn ?? 0,
     "system.experience.total": totalXP,
     "system.experience.available": totalXP - usedXP,
     "flags.starwarsffg.xpLog": [],
@@ -845,8 +1141,13 @@ async function importXML(actor, xmlString) {
 
   ui.notifications.info(
     `Imported "${charName || actor.name}" — ${report.matched.length} linked, ` +
-      `${report.stubbed.length} stubbed.`
+      `${report.stubbed.length} stubbed` +
+      (report.skipped.length ? `, ${report.skipped.length} skipped` : "") +
+      `.`
   );
+  if (report.skipped.length) {
+    console.warn(`${MODULE_ID} | Skipped (innate, granted by gear): ${report.skipped.join(", ")}`);
+  }
   if (report.stubbed.length) {
     console.warn(`${MODULE_ID} | Unmatched (stubbed): ${report.stubbed.join(", ")}`);
     ui.notifications.warn(

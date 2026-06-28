@@ -2,7 +2,7 @@
   "id": "ffg-xml-importer",
   "title": "Roger, Roger! An OggDude XML Importer",
   "description": "Import OggDude character XML files into Star Wars FFG actors.",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "compatibility": {
     "minimum": "12",
     "verified": "14"
