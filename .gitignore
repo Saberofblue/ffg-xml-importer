@@ -5,6 +5,9 @@
 module.zip
 *.zip
 
+# Personal campaign content (not part of the module)
+*.pdf
+
 # OS cruft
 Thumbs.db
 .DS_Store
