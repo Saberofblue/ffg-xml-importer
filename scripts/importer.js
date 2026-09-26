@@ -305,7 +305,7 @@ function applyCraftedMods(att, ci) {
   }
   for (const [modKey, rank] of ranks) {
     const mod = mods.find(
-      (x) => foundry.utils.getProperty(x, "flags.starwarsffg.ffgimportid") === modKey
+      (x) => foundry.utils.getProperty(x, `flags.${game.system.id}.ffgimportid`) === modKey
     );
     if (!mod) {
       console.warn(
@@ -354,7 +354,7 @@ async function buildAttachments(attachNode, report) {
     const att = source.obj;
     delete att._id;
     att.flags = att.flags ?? {};
-    att.flags.starwarsffg = foundry.utils.mergeObject(att.flags.starwarsffg ?? {}, {
+    att.flags[game.system.id] = foundry.utils.mergeObject(att.flags[game.system.id] ?? {}, {
       ffgimportid: key,
       isCompendium: source.uuid.startsWith("Compendium."),
       ffgUuid: source.uuid,
@@ -469,8 +469,8 @@ let _skillListCache = null;
 function skillList() {
   if (_skillListCache) return _skillListCache;
   try {
-    const theme = game.settings.get("starwarsffg", "skilltheme");
-    const lists = game.settings.get("starwarsffg", "arraySkillList");
+    const theme = game.settings.get(game.system.id, "skilltheme");
+    const lists = game.settings.get(game.system.id, "arraySkillList");
     const skills = (lists.find((i) => i.id === theme) ?? lists[0])?.skills;
     if (skills && Object.keys(skills).length) {
       _skillListCache = Object.keys(skills).map((n) => [n, skills[n].type, skills[n].characteristic]);
@@ -593,7 +593,7 @@ function isWorldPack(pack) {
 async function buildSourceIndex() {
   SOURCE_INDEX.clear();
   for (const it of game.items) {
-    const k = it.getFlag?.("starwarsffg", "ffgimportid");
+    const k = it.getFlag?.(game.system.id, "ffgimportid");
     if (k) SOURCE_INDEX.set(`${it.type}::${k}`, it.uuid);
   }
   for (const pack of game.packs) {
@@ -601,14 +601,14 @@ async function buildSourceIndex() {
     let index;
     try {
       index = await pack.getIndex({
-        fields: ["type", "flags.starwarsffg.ffgimportid"],
+        fields: ["type", `flags.${game.system.id}.ffgimportid`],
       });
     } catch (err) {
       console.warn(`${MODULE_ID} | Could not index pack ${pack.collection}`, err);
       continue;
     }
     for (const entry of index) {
-      const k = foundry.utils.getProperty(entry, "flags.starwarsffg.ffgimportid");
+      const k = foundry.utils.getProperty(entry, `flags.${game.system.id}.ffgimportid`);
       if (!k) continue;
       const mapKey = `${entry.type}::${k}`;
       if (!SOURCE_INDEX.has(mapKey)) {
@@ -642,7 +642,7 @@ function stubItem(d) {
     name: d.name || d.key || d.type,
     type: d.type,
     flags: {
-      starwarsffg: { ffgimportid: d.key },
+      [game.system.id]: { ffgimportid: d.key },
       [MODULE_ID]: { generated: true },
     },
     system,
@@ -661,7 +661,7 @@ function innateUnarmed(d) {
     name: "Unarmed",
     type: "weapon",
     flags: {
-      starwarsffg: { ffgimportid: "UNARMED" },
+      [game.system.id]: { ffgimportid: "UNARMED" },
       [MODULE_ID]: { generated: true },
     },
     system: {
@@ -688,7 +688,7 @@ function weaponDefensiveRating(item) {
   const addFrom = (mods) => {
     for (const m of mods ?? []) {
       const isDef =
-        m?.flags?.starwarsffg?.ffgimportid === "DEFENSIVE" ||
+        m?.flags?.[game.system.id]?.ffgimportid === "DEFENSIVE" ||
         /^Defensive\b/i.test(m?.name ?? "");
       if (isDef) total += parseInt(m?.system?.rank, 10) || 0;
     }
@@ -706,7 +706,7 @@ async function cloneItem(source, d, report) {
   delete obj._id;
   obj.name = obj.name || d.name;
   obj.flags = obj.flags ?? {};
-  obj.flags.starwarsffg = foundry.utils.mergeObject(obj.flags.starwarsffg ?? {}, {
+  obj.flags[game.system.id] = foundry.utils.mergeObject(obj.flags[game.system.id] ?? {}, {
     ffgimportid: d.key,
     isCompendium: source.uuid.startsWith("Compendium."),
     ffgUuid: source.uuid,
@@ -1128,7 +1128,7 @@ async function importXML(actor, xmlString) {
     "system.stats.soak.value": charValues.Brawn ?? 0,
     "system.experience.total": totalXP,
     "system.experience.available": totalXP - usedXP,
-    "flags.starwarsffg.xpLog": [],
+    [`flags.${game.system.id}.xpLog`]: [],
   });
 
   // Equipped armour/weapon items ship a frozen `(inherent)` soak/defence effect
@@ -1220,7 +1220,7 @@ async function openImportDialog(actor) {
 
 function injectButton(app) {
   try {
-    if (game.system.id !== "starwarsffg") return;
+    if (!["starwarsffg", "starwarsffg_sandbox"].includes(game.system.id)) return;
     const actor = app.actor ?? app.document;
     if (!actor || actor.type !== "character") return;
 

@@ -2,17 +2,34 @@
   "id": "ffg-xml-importer",
   "title": "Roger, Roger! An OggDude XML Importer",
   "description": "Import OggDude character XML files into Star Wars FFG actors.",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "compatibility": {
     "minimum": "12",
     "verified": "14"
   },
-  "authors": [{ "name": "Saberofblue" }],
-  "esmodules": ["scripts/importer.js"],
-  "styles": ["styles/importer.css"],
+  "authors": [
+    {
+      "name": "Saberofblue"
+    }
+  ],
+  "esmodules": [
+    "scripts/importer.js"
+  ],
+  "styles": [
+    "styles/importer.css"
+  ],
   "languages": [],
   "relationships": {
-    "systems": [{ "id": "starwarsffg", "type": "system" }]
+    "systems": [
+      {
+        "id": "starwarsffg",
+        "type": "system"
+      },
+      {
+        "id": "starwarsffg_sandbox",
+        "type": "system"
+      }
+    ]
   },
   "url": "https://github.com/Saberofblue/ffg-xml-importer",
   "readme": "https://github.com/Saberofblue/ffg-xml-importer#readme",
