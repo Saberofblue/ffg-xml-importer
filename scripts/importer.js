@@ -233,6 +233,7 @@ function attachmentStatChanges(a) {
       soak: ["system.stats.soak.value"],
       wounds: ["system.stats.wounds.max"],
       strain: ["system.stats.strain.max"],
+      encumbrancemax: ["system.stats.encumbrance.max"],
       "defence-ranged": ["system.stats.defence.ranged"],
       "defense-ranged": ["system.stats.defence.ranged"],
       "defence-melee": ["system.stats.defence.melee"],
@@ -916,6 +917,10 @@ async function importXML(actor, xmlString) {
     // synced in _preUpdate), so keeping it double-counts Brawn. Strip it; armour
     // and talent soak stay as effects. Base soak is rebaked to Brawn below.
     const stripSoak = it.type === "species";
+    // Likewise the species' (inherent) encumbrance.max line bakes SPECIES Brawn + 5; the
+    // threshold is rebaked below as 5 + the character's actual Brawn, and gear/attachment
+    // ENCTADD lines (Backpack +4 etc.) are kept as effects on top - as OggDude computes it.
+    const stripSpeciesEncumbrance = it.type === "species";
     // Unequipped armour/weapon must not contribute soak/defence. The system only
     // disables an item's (inherent) effect when its equip state CHANGES via the
     // sheet (item-ffg.js _onUpdate); a freshly-created-unequipped item keeps it
@@ -931,6 +936,7 @@ async function importXML(actor, xmlString) {
           const key = ch.key ?? "";
           if (BAKED_EFFECT_KEY.test(key)) return false;
           if (stripSoak && key === "system.stats.soak.value") return false;
+          if (stripSpeciesEncumbrance && key === "system.stats.encumbrance.max") return false;
           return true;
         });
       }
@@ -1126,6 +1132,8 @@ async function importXML(actor, xmlString) {
     "system.stats.wounds.value": 0,
     "system.stats.strain.value": 0,
     "system.stats.soak.value": charValues.Brawn ?? 0,
+    // Encumbrance threshold = 5 + Brawn (EotE CRB p.153); gear bonuses ride on their own effects
+    "system.stats.encumbrance.max": 5 + (charValues.Brawn ?? 0),
     "system.experience.total": totalXP,
     "system.experience.available": totalXP - usedXP,
     [`flags.${game.system.id}.xpLog`]: [],
