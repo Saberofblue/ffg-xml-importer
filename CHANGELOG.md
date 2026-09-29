@@ -1,5 +1,11 @@
 # Roger, Roger! An OggDude XML Importer
 
+## 1.3.3
+
+- Morality (Force and Destiny), Duty (Age of Rebellion) and Motivations are now imported as items: the emotional strength/weakness pair, each duty, and each specific motivation resolve from the world's OggDude packs (obligation pack typed morality/duty, motivation pack), so the sheet's Morality and Conflict boxes appear for Force and Destiny characters.
+- The portrait is written in its own update, after everything else, so hosts that rewrite base64 images into uploaded assets (The Forge) never intercept the update that carries the character.
+- After the import settles, the skill ranks and career flags are checked against what was written; if they were lost they are written again and the console says so.
+
 ## Current Build Summary for the Next Foundry VTT Update
 
 Version: 1.3.0

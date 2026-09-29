@@ -639,6 +639,7 @@ async function resolveSource(type, key) {
 function stubItem(d) {
   const system = { quantity: { value: d.count ?? 1 } };
   if (d.extra) Object.assign(system, d.extra);
+  if (d.stubExtra) Object.assign(system, d.stubExtra);
   return {
     name: d.name || d.key || d.type,
     type: d.type,
@@ -892,6 +893,53 @@ async function importXML(actor, xmlString) {
     }
   }
 
+  /* Duty (Age of Rebellion), Morality (Force and Destiny) and Motivations.
+   * The system's data importer files all three obligation-tab lists (duty,
+   * obligation, morality) into one "obligation" pack, typed by system.type,
+   * and the specific motivations into a "motivation" pack; the character
+   * sheet only shows its Morality/Conflict boxes when a morality item exists. */
+  for (const o of els(el(root, "Duties"), "CharDuty")) {
+    const dk = txt(o, "DutyKey") || txt(o, "Key");
+    if (dk) {
+      descriptors.push({
+        type: "obligation",
+        key: dk,
+        name: txt(o, "Name") || dk,
+        extra: { type: "duty", magnitude: int(o, "Size") },
+      });
+    }
+  }
+  for (const pair of els(el(el(root, "Morality"), "MoralityPairs"), "MoralityPair")) {
+    for (const [tag, subtype] of [
+      ["StrengthKey", "Emotional Strength"],
+      ["WeaknessKey", "Emotional Weakness"],
+    ]) {
+      const mk = txt(pair, tag);
+      if (mk) {
+        descriptors.push({
+          type: "obligation",
+          key: mk,
+          name: mk,
+          extra: { type: "morality", subtype, magnitude: 0 },
+        });
+      }
+    }
+  }
+  for (const m of els(el(root, "Motivations"), "CharMotivation")) {
+    const specific = txt(m, "SpecMotiveKey");
+    const general = txt(m, "MotiveKey");
+    const key = specific || general;
+    if (!key) continue;
+    const category = txt(m, "Name") || general;
+    descriptors.push({
+      type: "motivation",
+      key,
+      name: category || key,
+      // only a stub needs its category set; a pack match already carries it
+      stubExtra: category ? { type: category } : undefined,
+    });
+  }
+
   descriptors.push(...forcePowerDescriptors(root));
   descriptors.push(...childKeyDescriptors(root, "SigAbilities", "signatureability"));
 
@@ -1077,11 +1125,14 @@ async function importXML(actor, xmlString) {
   /* --- Portrait --- */
   const portraitNode = el(root, "Portrait");
   const portrait = portraitNode ? portraitNode.textContent.replace(/\s+/g, "") : "";
+  // The portrait travels in its own update, last (see below): hosts that turn
+  // base64 images into uploaded assets (The Forge) intercept the update that
+  // carries them, and the rest of the character must not ride along with it.
+  let portraitUpdate = null;
   if (portrait) {
     const portraitData = `data:image/jpeg;base64,${portrait}`;
-    updateData.img = portraitData;
     // Use the same portrait for the prototype token so the map token matches.
-    updateData["prototypeToken.texture.src"] = portraitData;
+    portraitUpdate = { img: portraitData, "prototypeToken.texture.src": portraitData };
   }
 
   /* --- Write to the actor --- */
@@ -1139,6 +1190,38 @@ async function importXML(actor, xmlString) {
     [`flags.${game.system.id}.xpLog`]: [],
   });
 
+  if (portraitUpdate) await actor.update(portraitUpdate);
+
+  /* --- Verify the skills landed ---
+   * Ranks and career flags are written by the main update above. If anything
+   * between then and now (a hook reacting to the item churn, or a hosting
+   * platform rewriting the update) dropped them, write them again by
+   * themselves and say so, so the cause can be found from the console. */
+  const skillWrites = Object.entries(updateData).filter(([k]) =>
+    /^system\.skills\..+\.(rank|careerskill)$/.test(k)
+  );
+  const lost = (writes) =>
+    writes.filter(([k, v]) => foundry.utils.getProperty(actor._source, k) !== v);
+  let missing = lost(skillWrites);
+  if (missing.length) {
+    console.warn(
+      `${MODULE_ID} | ${missing.length} skill value(s) did not persist after the main update ` +
+        `(e.g. ${missing.slice(0, 4).map(([k, v]) => `${k.replace("system.skills.", "")}=${v}`).join(", ")}); writing them again.`
+    );
+    await actor.update(Object.fromEntries(skillWrites));
+    missing = lost(skillWrites);
+    if (missing.length) {
+      console.error(`${MODULE_ID} | skill values still not persisted after retry:`, missing);
+      ui.notifications.warn("Skill ranks did not persist on this actor — see the console (F12).");
+    }
+  }
+  console.log(
+    `${MODULE_ID} v${game.modules.get(MODULE_ID)?.version ?? "?"} | stored skill ranks: ` +
+      Object.entries(actor._source.system.skills ?? {})
+        .filter(([, v]) => (v?.rank ?? 0) > 0)
+        .map(([k, v]) => `${k}=${v.rank}`)
+        .join(", ")
+  );
   // Equipped armour/weapon items ship a frozen `(inherent)` soak/defence effect
   // captured while the catalog item was unequipped (so it resolves to 0). The
   // system only rebuilds it from `system.soak.value` when the item's data is
