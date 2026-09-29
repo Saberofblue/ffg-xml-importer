@@ -1326,7 +1326,10 @@ function injectButton(app) {
     btn.innerHTML = '<i class="fas fa-file-import"></i> Import XML';
     btn.addEventListener("click", (ev) => {
       ev.preventDefault();
-      ev.stopPropagation();
+      // The V1 window also binds a click handler to every .header-button and
+      // looks our button up in its own header-button list, where it is not,
+      // so keep the click from reaching that handler.
+      ev.stopImmediatePropagation();
       openImportDialog(actor);
     });
 
