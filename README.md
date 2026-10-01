@@ -13,6 +13,8 @@ stats are rebuilt from the XML (linking to your world's compendia where possible
 - Foundry VTT: v12–v14
 - System: `starwarsffg`
 
+With Star Wars FFG 2.0.5 or later the importer relies on the system's managed item effects: re-import the OggDude dataset (Item Modifiers, Attachments, Gear, Weapons, Armor, Talents) with that system first, so attachments carry their base mods and descriptors carry their mechanics. Installed mods the catalog still lacks are built from the system's descriptor table during the character import.
+
 ## Installation (manifest URL)
 
 In Foundry: **Add-on Modules → Install Module**, then paste the manifest URL:

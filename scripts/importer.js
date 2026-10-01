@@ -152,6 +152,46 @@ async function readFileText(file) {
 }
 
 /* -------------------------------------------- */
+/*  System capabilities                         */
+/* -------------------------------------------- */
+
+/** Item types whose Active Effects the system derives from the item's own data (2.0.5+). */
+const CARRIER_TYPES = ["weapon", "shipweapon", "armour", "gear", "shipattachment"];
+
+/**
+ * From system 2.0.5 a carrier's effects are rebuilt from its modifiers by the system itself, so
+ * nothing needs hoisting onto the host and every installed modification counts by rank.
+ */
+function nativeItemEffects() {
+  return !!game.ffg?.ItemEffects;
+}
+
+/** Foundry 14 stores an effect's changes under `system.changes` with a string `type`. */
+function isV14() {
+  return Number(game.release?.generation ?? 0) >= 14;
+}
+
+/** An additive change in the shape the running Foundry persists. */
+function addChange(key, value) {
+  return isV14() ? { key, type: "add", value } : { key, mode: 2, value };
+}
+
+/** Whether a change adds (either shape). */
+function isAddChange(change) {
+  return change?.type === "add" || Number(change?.mode) === 2;
+}
+
+/** The change list of an effect's plain data, whichever shape it has. */
+function effectChanges(effect) {
+  return effect?.system?.changes ?? effect?.changes ?? [];
+}
+
+function setEffectChanges(effect, changes) {
+  if (effect?.system?.changes) effect.system.changes = changes;
+  else effect.changes = changes;
+}
+
+/* -------------------------------------------- */
 /*  Core import                                 */
 /* -------------------------------------------- */
 
@@ -167,6 +207,8 @@ function gearDescriptors(root, containerTag, itemTag, type) {
       type,
       key,
       name: key || itemTag,
+      // the per-character instance key: what a holster's <StorageItems> refers to
+      instanceKey: uuid,
       count: int(node, "Count") || 1,
       // Carried state and character-specific hard points the cloned catalog
       // item doesn't know about. <Equipped> drives `equippable.equipped`, which
@@ -242,7 +284,7 @@ function attachmentStatChanges(a) {
       defence: ["system.stats.defence.ranged", "system.stats.defence.melee"],
       defense: ["system.stats.defence.ranged", "system.stats.defence.melee"],
     }[String(a?.mod ?? "").toLowerCase()] ?? [];
-    return keys.map((key) => ({ key, mode: CONST.ACTIVE_EFFECT_MODES.ADD, value }));
+    return keys.map((key) => addChange(key, value));
   }
   // A mod that grants the wearer extra symbols on a specific skill (e.g. Reflec
   // Shadowskin's automatic Advantage to Stealth). The system stores these as a
@@ -252,18 +294,15 @@ function attachmentStatChanges(a) {
   if (skillField) {
     const skill = String(a?.mod ?? "");
     if (!skill || !value) return [];
-    return [
-      { key: `system.skills.${skill}.${skillField}`, mode: CONST.ACTIVE_EFFECT_MODES.ADD, value },
-    ];
+    return [addChange(`system.skills.${skill}.${skillField}`, value)];
   }
   return [];
 }
 
 /** Minimal transfer Active Effect, shaped like the ones the system persists. */
 function makeAttachmentEffect(name, changes) {
-  return {
+  const effect = {
     name,
-    changes,
     disabled: false,
     type: "base",
     system: {},
@@ -275,6 +314,52 @@ function makeAttachmentEffect(name, changes) {
     statuses: [],
     sort: 0,
     flags: {},
+  };
+  if (isV14()) effect.system = { changes };
+  else effect.changes = changes;
+  return effect;
+}
+
+/**
+ * Build the modification an installed mod the catalog attachment lacks would have carried,
+ * from the system's own knowledge of the descriptor (2.0.5+). Null when nothing is known.
+ */
+async function synthesiseModification(modKey, rank) {
+  let ImportHelpers = null;
+  try {
+    ImportHelpers = (await import(`/systems/${game.system.id}/modules/importer/import-helpers.js`)).default;
+  } catch (err) {
+    return null;
+  }
+  const descriptor = await resolveSource("itemmodifier", modKey);
+  if (descriptor) {
+    const data = descriptor.obj;
+    delete data._id;
+    data.system = data.system ?? {};
+    if (!Object.keys(data.system.attributes ?? {}).length) {
+      const mapped = ImportHelpers.descriptorAttributes?.(modKey);
+      if (mapped) data.system.attributes = mapped;
+    }
+    data.system.active = true;
+    data.system.rank = rank;
+    data.flags = data.flags ?? {};
+    data.flags[game.system.id] = { ...(data.flags[game.system.id] ?? {}), ffgimportid: modKey, baseMod: true };
+    return data;
+  }
+  const talent = await resolveSource("talent", modKey);
+  if (talent && ImportHelpers.talentGrantModifier) {
+    const doc = await fromUuid(talent.uuid);
+    const data = ImportHelpers.talentGrantModifier(doc, modKey, rank);
+    data.system.active = true;
+    return data;
+  }
+  const mapped = ImportHelpers.descriptorAttributes?.(modKey);
+  if (!mapped) return null;
+  return {
+    name: modKey,
+    type: "itemmodifier",
+    flags: { [game.system.id]: { ffgimportid: modKey, baseMod: true } },
+    system: { description: "", type: "all", active: true, rank, attributes: mapped },
   };
 }
 
@@ -293,31 +378,80 @@ function makeAttachmentEffect(name, changes) {
  * never double-counts soak/defence. Keyless (MiscDesc) mods carry no catalog
  * key to match and are left as cloned.
  */
-function applyCraftedMods(att, ci) {
-  const mods = att.system?.itemmodifier;
-  if (!Array.isArray(mods) || !mods.length) return;
+async function applyCraftedMods(att, ci, report, storedKeys) {
+  const native = nativeItemEffects();
+  att.system = att.system ?? {};
+  if (!Array.isArray(att.system.itemmodifier)) att.system.itemmodifier = [];
+  const mods = att.system.itemmodifier;
   const ranks = new Map();
+  const textRanks = new Map();
   for (const m of els(el(ci, "AllMods"), "Mod")) {
     const modKey = txt(m, "Key");
-    // HPADD is applied to the host's hard-point capacity (see buildAttachments),
-    // not as an itemmodifier, so don't try to match it to a catalog mod here.
-    if (!modKey || modKey === "HPADD") continue;
+    // what this holster, mount or pouch holds, by the stored items' instance keys
+    for (const stored of els(el(m, "StorageItems"), "StorageItem")) {
+      const key = txt(stored, "CharItemKey");
+      if (key) storedKeys?.add(key);
+    }
+    if (!modKey) {
+      // a mod OggDude only describes in words is matched to the catalog row by that text
+      const text = normaliseModText(txt(m, "MiscDesc"));
+      if (text) textRanks.set(text, (textRanks.get(text) ?? 0) + (int(m, "Count") || 1));
+      continue;
+    }
+    // HPADD is applied to the host's hard-point capacity (see buildAttachments) on the old
+    // system; the new one reads it as a hard-point modification like any other.
+    if (modKey === "HPADD" && !native) continue;
     ranks.set(modKey, (ranks.get(modKey) ?? 0) + (int(m, "Count") || 1));
   }
+  const importId = (x) => foundry.utils.getProperty(x, `flags.${game.system.id}.ffgimportid`);
+  const isBase = (x) => !!foundry.utils.getProperty(x, `flags.${game.system.id}.baseMod`);
   for (const [modKey, rank] of ranks) {
-    const mod = mods.find(
-      (x) => foundry.utils.getProperty(x, `flags.${game.system.id}.ffgimportid`) === modKey
-    );
-    if (!mod) {
+    const rows = mods.filter((x) => importId(x) === modKey);
+    if (!rows.length && native) {
+      const mod = await synthesiseModification(modKey, rank);
+      if (mod) {
+        mods.push(mod);
+        report?.synthesised?.push(`${txt(ci, "AttachKey")}::${modKey}`);
+        continue;
+      }
+    }
+    if (!rows.length) {
       console.warn(
         `${MODULE_ID} | ${txt(ci, "AttachKey")}: no catalog mod for installed "${modKey}"`
       );
       continue;
     }
+    // OggDude's Count is the total installed: the base mod keeps its own ranks and the
+    // purchasable row (catalogued after it) takes the rest, up to what can be bought
+    let remaining = rank;
+    rows.forEach((mod, i) => {
+      mod.system = mod.system ?? {};
+      const last = i === rows.length - 1;
+      let share;
+      if (last) share = remaining;
+      else if (isBase(mod)) share = Math.min(remaining, parseInt(mod.system.rank, 10) || 1);
+      else share = Math.min(remaining, parseInt(mod.system.maxRank, 10) || remaining);
+      remaining -= share;
+      mod.system.active = share > 0 || isBase(mod);
+      if (share > 0) mod.system.rank = share;
+    });
+  }
+  for (const [text, rank] of textRanks) {
+    const mod = mods.find((x) => !importId(x) && normaliseModText(x.system?.description) === text);
+    if (!mod) continue; // a base mod in words is already the attachment's own description or attributes
     mod.system = mod.system ?? {};
     mod.system.active = true;
     mod.system.rank = rank;
   }
+}
+
+/** A mod's wording as a comparison key: tags, dice tokens, case and spacing do not matter. */
+function normaliseModText(text) {
+  return String(text ?? "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
 }
 
 /**
@@ -331,6 +465,8 @@ function applyCraftedMods(att, ci) {
 async function buildAttachments(attachNode, report) {
   const attachments = [];
   const parentEffects = [];
+  const storedKeys = new Set();
+  const native = nativeItemEffects();
   let addedHardpoints = 0;
   for (const ci of els(attachNode, "CharItemAttachment")) {
     const key = txt(ci, "AttachKey");
@@ -360,9 +496,13 @@ async function buildAttachments(attachNode, report) {
       isCompendium: source.uuid.startsWith("Compendium."),
       ffgUuid: source.uuid,
     });
-    for (const [attrKey, a] of Object.entries(att.system?.attributes ?? {})) {
-      const changes = attachmentStatChanges(a);
-      if (changes.length) parentEffects.push(makeAttachmentEffect(attrKey, changes));
+    // the system of 2.0.5+ reads an attachment's mods itself; older ones need the stat
+    // attributes hoisted onto the host item as effects
+    if (!native) {
+      for (const [attrKey, a] of Object.entries(att.system?.attributes ?? {})) {
+        const changes = attachmentStatChanges(a);
+        if (changes.length) parentEffects.push(makeAttachmentEffect(attrKey, changes));
+      }
     }
     // OggDude grants the Superior quality on ARMOUR +1 soak. The system models
     // Superior as a bare descriptor with no mechanical effect (Superior Armor
@@ -371,18 +511,16 @@ async function buildAttachments(attachNode, report) {
     // grants +1 Advantage (a dice-pool effect handled elsewhere), so this is gated
     // to armour attachments. Superior's -1 encumbrance is a no-op for worn armour
     // (the system already floors the worn contribution at 0) and is omitted.
-    if (isSuperior && att.system?.type === "armour") {
+    if (isSuperior && att.system?.type === "armour" && !native) {
       parentEffects.push(
-        makeAttachmentEffect("Superior", [
-          { key: "system.stats.soak.value", mode: CONST.ACTIVE_EFFECT_MODES.ADD, value: "1" },
-        ])
+        makeAttachmentEffect("Superior", [addChange("system.stats.soak.value", "1")])
       );
     }
-    applyCraftedMods(att, ci);
+    await applyCraftedMods(att, ci, report, storedKeys);
     report.matched.push(`itemattachment::${key}`);
     attachments.push(att);
   }
-  return { attachments, parentEffects, addedHardpoints };
+  return { attachments, parentEffects, addedHardpoints: native ? 0 : addedHardpoints, storedKeys };
 }
 
 /** Descriptors for simple <Key>-only containers (sig abilities). */
@@ -511,9 +649,10 @@ function expandCollapsedSkillEffects(obj) {
   const groupOf = (skill) => groupFor(skill, "type") ?? groupFor(skill, "char");
 
   for (const eff of obj.effects ?? []) {
-    if (!Array.isArray(eff.changes)) continue;
+    const changes = effectChanges(eff);
+    if (!Array.isArray(changes)) continue;
     const out = [];
-    for (const ch of eff.changes) {
+    for (const ch of changes) {
       const m = /^system\.skills\.(.+)\.([A-Za-z]+)$/.exec(ch.key ?? "");
       const v = m ? parseInt(ch.value, 10) : NaN;
       const group = m && Number.isFinite(v) && v > 1 ? groupOf(m[1]) : null;
@@ -524,7 +663,7 @@ function expandCollapsedSkillEffects(obj) {
         out.push(ch);
       }
     }
-    eff.changes = out;
+    setEffectChanges(eff, out);
   }
 
   // Keep the talent-tree tooltip honest (cosmetic): correct the per-talent value.
@@ -714,6 +853,7 @@ async function cloneItem(source, d, report) {
     ffgUuid: source.uuid,
   });
   obj.flags[MODULE_ID] = { generated: true };
+  if (d.instanceKey) obj.flags[MODULE_ID].instanceKey = d.instanceKey;
   obj._stats = foundry.utils.mergeObject(obj._stats ?? {}, {
     compendiumSource: source.uuid,
   });
@@ -742,11 +882,13 @@ async function cloneItem(source, d, report) {
   // Installed attachments: clone the linked attachment docs into the host
   // item and add the parent effects their stat attributes require.
   if (d.attachNode && foundry.utils.hasProperty(obj, "system.itemattachment")) {
-    const { attachments, parentEffects, addedHardpoints } = await buildAttachments(d.attachNode, report);
+    const { attachments, parentEffects, addedHardpoints, storedKeys } = await buildAttachments(d.attachNode, report);
     if (attachments.length) {
       const existing = foundry.utils.getProperty(obj, "system.itemattachment") ?? [];
       foundry.utils.setProperty(obj, "system.itemattachment", existing.concat(attachments));
     }
+    // linked to the stored items once every item exists (see the storage pass in importXML)
+    if (storedKeys.size) obj.flags[MODULE_ID].stores = [...storedKeys];
     if (parentEffects.length) obj.effects = (obj.effects ?? []).concat(parentEffects);
     // HPADD attachments (e.g. Reverse Engineering) raise the host's hard-point
     // capacity — add on top of the catalog base + any <AddlHP> already applied.
@@ -858,7 +1000,7 @@ async function importXML(actor, xmlString) {
    * Stat writes below depend on what linked, so granted ranks/effects from
    * matched species/career/specialization items aren't double-counted. */
   await buildSourceIndex();
-  const report = { matched: [], stubbed: [], skipped: [] };
+  const report = { matched: [], stubbed: [], skipped: [], synthesised: [] };
 
   const descriptors = [
     ...gearDescriptors(root, "Weapons", "CharWeapon", "weapon"),
@@ -977,16 +1119,23 @@ async function importXML(actor, xmlString) {
       ["armour", "weapon"].includes(it.type) &&
       foundry.utils.hasProperty(it, "system.equippable.equipped") &&
       !foundry.utils.getProperty(it, "system.equippable.equipped");
+    if (nativeItemEffects() && CARRIER_TYPES.includes(it.type)) {
+      // the system rebuilds a carrier's effects from its modifiers once it is created, and
+      // applies them only while the item is carried and equipped
+      it.effects = [];
+      continue;
+    }
     for (const eff of it.effects ?? []) {
       if (unequipped && eff.name === "(inherent)") eff.disabled = true;
-      if (Array.isArray(eff.changes)) {
-        eff.changes = eff.changes.filter((ch) => {
+      const changes = effectChanges(eff);
+      if (Array.isArray(changes)) {
+        setEffectChanges(eff, changes.filter((ch) => {
           const key = ch.key ?? "";
           if (BAKED_EFFECT_KEY.test(key)) return false;
           if (stripSoak && key === "system.stats.soak.value") return false;
           if (stripSpeciesEncumbrance && key === "system.stats.encumbrance.max") return false;
           return true;
-        });
+        }));
       }
     }
   }
@@ -1102,9 +1251,9 @@ async function importXML(actor, xmlString) {
   for (const it of items) {
     for (const eff of it.effects ?? []) {
       if (eff.disabled) continue;
-      for (const ch of eff.changes ?? []) {
+      for (const ch of effectChanges(eff)) {
         const m = /^system\.skills\.(.+)\.rank$/.exec(ch.key ?? "");
-        if (m && Number(ch.mode) === CONST.ACTIVE_EFFECT_MODES.ADD) {
+        if (m && isAddChange(ch)) {
           effectSkillRanks[m[1]] =
             (effectSkillRanks[m[1]] ?? 0) + (parseInt(ch.value, 10) || 0);
         }
@@ -1120,6 +1269,10 @@ async function importXML(actor, xmlString) {
       sumAll(rank) - int(rank, "NonCareerRanks") - (effectSkillRanks[jsonName] ?? 0);
     updateData[`system.skills.${jsonName}.rank`] = Math.max(0, baked);
     updateData[`system.skills.${jsonName}.careerskill`] = isTrue(txt(node, "isCareer"));
+    // a form technique (Ataru: Agility, Soresu: Intellect, ...) rolls the skill with another
+    // characteristic; OggDude records the choice on the skill
+    const override = CHARACTERISTIC_MAP[txt(node, "CharKeyOverride")];
+    if (override) updateData[`system.skills.${jsonName}.characteristic`] = override;
   }
 
   /* --- Portrait --- */
@@ -1154,6 +1307,26 @@ async function importXML(actor, xmlString) {
   }
 
   if (items.length) await actor.createEmbeddedDocuments("Item", items);
+
+  /* --- Holsters, mounts and pouches ---
+   * An installed storage mod lists what it holds by the stored items' instance keys. Now that
+   * every item exists, point each stored item at its host; the system then leaves it out of
+   * the carried encumbrance while the host is carried. */
+  const byInstance = new Map();
+  for (const it of actor.items) {
+    const key = it.getFlag(MODULE_ID, "instanceKey");
+    if (key) byInstance.set(key, it);
+  }
+  const storageLinks = [];
+  for (const host of actor.items) {
+    for (const key of host.getFlag(MODULE_ID, "stores") ?? []) {
+      const stored = byInstance.get(key);
+      if (stored && stored.id !== host.id) storageLinks.push({ _id: stored.id, "system.storedIn": host.id });
+    }
+  }
+  if (storageLinks.length && foundry.utils.hasProperty(actor.items.contents[0] ?? {}, "system.storedIn")) {
+    await actor.updateEmbeddedDocuments("Item", storageLinks);
+  }
 
   /* --- Finalize thresholds, current damage, and XP (must run LAST) ---
    * Threshold model on starwarsffg 2.x: a stat = stored base + applied effects.
@@ -1238,6 +1411,9 @@ async function importXML(actor, xmlString) {
   );
   if (report.skipped.length) {
     console.warn(`${MODULE_ID} | Skipped (innate, granted by gear): ${report.skipped.join(", ")}`);
+  }
+  if (report.synthesised.length) {
+    console.log(`${MODULE_ID} | Installed mods the catalog attachment lacked, built from the system's descriptor table: ${report.synthesised.join(", ")}`);
   }
   if (report.stubbed.length) {
     console.warn(`${MODULE_ID} | Unmatched (stubbed): ${report.stubbed.join(", ")}`);

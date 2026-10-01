@@ -1,5 +1,14 @@
 # Roger, Roger! An OggDude XML Importer
 
+## 1.4.0
+
+- Works with the Star Wars FFG system's managed item effects (2.0.5+): attachment and modification bonuses are no longer hoisted onto the host item, every installed mod counts by its rank through the system's own computation, and nothing is synthesised for Superior. On an older system the previous behaviour is kept.
+- An installed mod the catalog attachment does not carry (a base mod from before the attachment data was re-imported, or a talent such as Quick Draw) is built from the system's descriptor table and reported in the console, instead of being dropped with a warning.
+- An installed mod's total count is spread over the attachment's rows the way it was bought: the base mod keeps its own ranks and the purchasable row takes the rest, so the editor shows what can still be bought. Mods OggDude describes only in words are matched to the catalog row by that text and marked installed.
+- Holsters, weapon mounts and pouches: items OggDude records as stored in an attachment's storage mod are linked to their host, so they stop counting toward encumbrance while the host is carried.
+- A skill's characteristic override (Ataru Technique: Lightsaber with Agility) is imported from the character's skill.
+- Foundry 14: effect changes are read and written in the Version 14 shape, which also fixes species-granted skill ranks being counted twice on 14; the deprecated effect-mode constant is no longer used.
+
 ## 1.3.3
 
 - Morality (Force and Destiny), Duty (Age of Rebellion) and Motivations are now imported as items: the emotional strength/weakness pair, each duty, and each specific motivation resolve from the world's OggDude packs (obligation pack typed morality/duty, motivation pack), so the sheet's Morality and Conflict boxes appear for Force and Destiny characters.
